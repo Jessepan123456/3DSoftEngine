@@ -86,50 +86,18 @@ namespace SoftEngine
             }
         }
 
-        public void DrawLine(Vector2 point0, Vector2 point1)
+        // Clamping vlaues to keep them between 0 and 1
+        float Clamp(float value, float min = 0, float max = 1)
         {
-            var dist = (point1 - point0).Length();
-
-            // If the distance btween the 2 points is less than 2 pixels
-            // We're exiting
-            if (dist < 2) 
-                return;
-
-            // Find the middle point between frist & second point
-            Vector2 middlePoint = point0 + (point1 - point0)/2;
-            // We draw this point on screen 
-            DrawPoint(middlePoint);
-            // Recursive algorithm launched between first & middle point
-            // and between middle & second point
-            DrawLine(point0, middlePoint);
-            DrawLine(middlePoint, point1);
+            return Math.Max(min, Math.Min(value, max));
         }
 
-        public void DrawBline(Vector2 point0, Vector2 point1)
+        // Interpolating the value between 2 vertices
+        // min is the starting point, max the ending point
+        // and gradient the % between 2 points
+        float Interpolate(float min, float max, float gradient)
         {
-            int x0 = (int)point0.X;
-            int y0 = (int)point0.Y;
-            int x1 = (int)point1.X;
-            int y1 = (int)point1.Y;
-
-            var dx = Math.Abs(x1 - x0);
-            var dy = Math.Abs(y1 - y0);
-            var sx = (x0 < x1) ? 1 : -1;
-            var sy = (y0 < y1) ? 1 : -1;
-            var err = dx - dy;
-
-            while (true)
-            {
-                DrawPoint(new Vector2(x0, y0));
-
-                // If it hits the other point
-                if ((x0 == x1) && (y0 == y1)) break;
-
-                // If it has a err, how should it move
-                var e2 = 2 * err;
-                if (e2 > -dy) { err -= dy; x0 += sx; }
-                if (e2 < dx ) { err += dx; y0 += sy; }
-            }
+            return min + (max - min) * Clamp(gradient);
         }
 
         // The main method of the engine that re-compute each vertex projection
@@ -140,7 +108,7 @@ namespace SoftEngine
             // What the camera located and what it looking at
             var viewMatrix = Matrix.LookAtLH(camera.Position, camera.Target, Vector3.UnitY);
             // perspective
-            var projectionMatrix = Matrix.PerspectiveFovRH(0.78f, (float)width / height, 0.01f, 1.0f);
+            var projectionMatrix = Matrix.PerspectiveFovLH(0.78f, (float)width / height, 0.01f, 1.0f);
 
             foreach(Mesh mesh in meshes)
             {
@@ -168,6 +136,73 @@ namespace SoftEngine
                     DrawBline(pixelC, pixelA);
                 }
             }
+        }
+
+        // Loading the JSON file in an asynchronous manner
+        public Mesh[] LoadJSONFile(string fileName)
+        {
+           var meshes = new List<Mesh>();
+
+           var data = File.ReadAllText(fileName);
+
+           dynamic jsonObject = Newtonsoft.Json.JsonConvert.DeserializeObject(data); 
+
+           for ( var meshIndex = 0; meshIndex < jsonObject.meshes.Count; meshIndex++)
+            {
+                var verticesArray = jsonObject.meshes[meshIndex].positions;
+
+                // Faces
+                var indicesArray = jsonObject.meshes[meshIndex].indices;
+
+                // Tells you which location on the texture should be mapped to that vertex
+                // var uvCount = jsonObject.meshes[meshIndex].uvCount.Value ?? 0;
+                var verticesStep = 3;
+
+                // Depending of the number of texture's coor per vertex
+                // we're jumping in hte vertices array by 6, 8 & 10 windows frame
+                // switch ((int)uvCount)
+                // {
+                //     case 0:
+                //         verticesStep = 6;
+                //         break;
+                //     case 1:
+                //         verticesStep = 8;
+                //         break;
+                //     case 2:
+                //         verticesStep = 10;
+                //         break;
+                // }
+
+                // the number of interesting vertices info for us
+                var verticesCount = verticesArray.Count / verticesStep;
+                // number of faces is logically the size of the array divided by 3 (A, B, C)
+                var facesCount = indicesArray.Count / 3;
+                var mesh = new Mesh(jsonObject.meshes[meshIndex].name.Value, verticesCount, facesCount);
+
+                // Filling the Vertices array of our mesh first
+                for (var index = 0; index < verticesCount; index++)
+                {
+                    var x = (float)verticesArray[index * verticesStep].Value;
+                    var y = (float)verticesArray[index * verticesStep + 1].Value;
+                    var z = (float)verticesArray[index * verticesStep + 2].Value;
+                    mesh.Vertices[index] = new Vector3(x, y, z);
+                }
+
+                // Then filling the Faces array
+                for (var index = 0; index < facesCount; index++)
+                {
+                    var a = (int)indicesArray[index * 3].Value;
+                    var b = (int)indicesArray[index * 3 + 1].Value;
+                    var c = (int)indicesArray[index * 3 + 2].Value;
+                    mesh.Faces[index] = new Face { A = a, B = b, C = c };
+                }
+
+                // Getting the position you've set in Blender
+                var position = jsonObject.meshes[meshIndex].position;
+                mesh.Position = new Vector3((float)position[0].Value, (float)position[1].Value, (float)position[2].Value);
+                meshes.Add(mesh);
+            }
+            return meshes.ToArray();
         }
     }
 }
