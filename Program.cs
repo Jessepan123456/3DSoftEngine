@@ -47,7 +47,7 @@ namespace SoftEngine
             // Rotate the cube slightly
             foreach (var mesh in meshes)
             {
-                mesh.Rotation = new Vector3(mesh.Rotation.X + 0.01f, mesh.Rotation.Y + 0.01f, mesh.Rotation.Z);
+                mesh.Rotation = new Vector3(mesh.Rotation.X, mesh.Rotation.Y + 0.01f, mesh.Rotation.Z);
 
             }
 

@@ -1,3 +1,6 @@
+using System.Formats.Asn1;
+using System.IO.Compression;
+using Microsoft.VisualBasic;
 using Raylib_cs;
 using SharpDX;
 
@@ -6,6 +9,7 @@ namespace SoftEngine
     public class Device
     {
         private byte[] backBuffer;
+        private readonly float[] depthBuffer;
         private int width;
         private int height;
         private Texture2D texture;
@@ -18,6 +22,7 @@ namespace SoftEngine
             // Back buffer size is equal to the number of pixels to draw
             // on screen (width * height) * 4 ( Values )
             backBuffer = new byte[width * height * 4];
+            depthBuffer = new float[width * height];
 
             // Create texture used to display our back buffer
             Image image = Raylib.GenImageColor(width, height, Raylib_cs.Color.Blank);
@@ -28,12 +33,19 @@ namespace SoftEngine
         // This method is called to clear the back buffer with a specific color
         public void Clear(byte r, byte g, byte b, byte a)
         {
+            // Clearing Back Buffer
             for (var index = 0; index < backBuffer.Length; index += 4)
             {
                 backBuffer[index] = b;
                 backBuffer[index + 1] = g;
                 backBuffer[index + 2] = r;
                 backBuffer[index + 3] = a;
+            }
+
+            // Clearing Depth Buffer
+            for (var index = 0; index < depthBuffer.Length; index++)
+            {
+                depthBuffer[index] = float.MaxValue;   
             }
         }
 
@@ -46,47 +58,66 @@ namespace SoftEngine
         }
 
         // Called to put a pixel on screen at a specific X,Y coor
-        public void PutPixel(int x, int y, Color4 color)
+        public void PutPixel(int x, int y, float z, Color4 color)
         {
             // As we have a 1-D Array for our back buffer
             // we need to know hte equivalent cell in 1-D based
             // on the 2D coor on screen
-            var index = ( x+ y * width) * 4;
+            var index = (x + y * width);
+            var index4 = index * 4;
 
-            backBuffer[index] = (byte)(color.Blue * 255);
-            backBuffer[index + 1] = (byte)(color.Green * 255);
-            backBuffer[index + 2] = (byte)(color.Red * 255);
-            backBuffer[index + 3] = (byte)(color.Alpha * 255);
+            if (depthBuffer[index] < z)
+            {
+                return; // Discard
+            }
+
+            depthBuffer[index] = z;
+
+            backBuffer[index4] = (byte)(color.Blue * 255);
+            backBuffer[index4 + 1] = (byte)(color.Green * 255);
+            backBuffer[index4 + 2] = (byte)(color.Red * 255);
+            backBuffer[index4 + 3] = (byte)(color.Alpha * 255);
         }
 
         // Project takes some 3D coor and transform them
         // in 2D coor using the transformation matrix
-        public Vector2 Project(Vector3 coord, Matrix transMat)
+        // It also transform the same coor and the normal to the vertex
+        // in the 3D world
+        public Vertex Project(Vertex vertex, Matrix transMat, Matrix world)
         {
-            // transforming the coor
-            var point = Vector3.TransformCoordinate(coord, transMat);
+            // transforming the coor into 2D space
+            var point2d = Vector3.TransformCoordinate(vertex.Coordinates, transMat);
+
+            // transforming the coor & the normal to the vertex in the 3D world
+            var point3dWorld = Vector3.TransformCoordinate(vertex.Coordinates, world);
+            var normal3dWorld = Vector3.TransformNormal(vertex.Normal, world);
 
             // The transformed coor will be based on coor system
             // starting on the center of the screen. But drawing on screen normally starts
             // from top left. We then need to transform them again to have x:0, y:0 on top left.
-            var x = point.X * width + width / 2.0f;
-            var y = -point.Y * height + height / 2.0f;
+            var x = point2d.X * width + width / 2.0f;
+            var y = -point2d.Y * height + height / 2.0f;
             
-            return (new Vector2(x, y));
+            return new Vertex
+            {
+                Coordinates = new Vector3(x, y, point2d.Z),
+                Normal = normal3dWorld,
+                WorldCoordinates = point3dWorld
+            };
         }
 
         // Draw Point calls PutPixel but does the clipping operation beofre
-        public void DrawPoint(Vector2 point)
+        public void DrawPoint(Vector3 point, Color4 color)
         {
             // Clipping what's visible on screen
             if (point.X >= 0 && point.Y >= 0 && point.X < width && point.Y < height)
             {
                 // Drawing a yellow point
-                PutPixel((int)point.X, (int)point.Y, new Color4(1.0f, 1.0f, 0.0f, 1.0f));
+                PutPixel((int)point.X, (int)point.Y, point.Z, color);
             }
         }
 
-        // Clamping vlaues to keep them between 0 and 1
+        // Clamping values to keep them between 0 and 1
         float Clamp(float value, float min = 0, float max = 1)
         {
             return Math.Max(min, Math.Min(value, max));
@@ -100,6 +131,165 @@ namespace SoftEngine
             return min + (max - min) * Clamp(gradient);
         }
 
+        // drawing line between 2 points from left to right
+        // papb -> pcpd
+        // pa, pb, pc, pd must then be sorted before
+        void ProcessScanLine(ScanLineData data, Vertex va, Vertex vb, Vertex vc, Vertex vd, Color4 color)
+        {
+            Vector3 pa = va.Coordinates;
+            Vector3 pb = vb.Coordinates;
+            Vector3 pc = vc.Coordinates;
+            Vector3 pd = vd.Coordinates;
+
+            // Thanks to current Y, we can compute the gradient to compute others values like
+            // the starting x (sx) and ending X (ex) to draw between
+            // if pa.Y == pb.Y or pc.Y == pd.Y, gradient is forced to 1
+            var gradient1 = pa.Y != pb.Y ? (data.currentY - pa.Y) / (pb.Y - pa.Y) : 1;
+            var gradient2 = pc.Y != pd.Y ? (data.currentY - pc.Y) / (pd.Y - pc.Y) : 1;
+
+            int sx = (int)Interpolate(pa.X, pb.X, gradient1);
+            int ex = (int)Interpolate(pc.X, pd.X, gradient2);
+
+            // starting Z & ending Z
+            float z1 = Interpolate(pa.Z, pb.Z, gradient1);
+            float z2 = Interpolate(pc.Z, pd.Z, gradient2);
+
+            var snl = Interpolate(data.ndotla, data.ndotlb, gradient1);
+            var enl = Interpolate(data.ndotlc, data.ndotld, gradient2);
+
+            // drawing a line from left (sx) to right (ex)
+            for (var x = sx; x < ex; x++)
+            {
+                float gradient = (x - sx) / (float)(ex - sx);
+
+                var z = Interpolate(z1, z2, gradient);
+                var ndotl = Interpolate(snl, enl, gradient);
+                // changing the color value using the cosine of the angle
+                // between the light vector and the normal vector
+                DrawPoint(new Vector3(x, data.currentY, z), color * ndotl);
+            }
+        }
+
+        // Compute the cosine of the angle between thel ight vector and the normal vector
+        // Returns a value between 0 and 1
+        float ComputeNDotL(Vector3 vertex, Vector3 normal, Vector3 lightPosition)
+        {
+            var lightDirection = lightPosition - vertex;
+
+            normal.Normalize();
+            lightDirection.Normalize();
+
+            return Math.Max(0, Vector3.Dot(normal, lightDirection));
+        }
+
+        public void DrawTriangle(Vertex v1, Vertex v2, Vertex v3, Color4 color)
+        {
+            // Sorting the points in order to always have this order on screen p1, p2 & p3
+            // with p1 always up (thuhs having the Y the lowest possible to be near the top screen)
+            // then p2 between p1 & p3
+            if (v1.Coordinates.Y > v2.Coordinates.Y)
+            {
+                var temp = v2;
+                v2 = v1;
+                v1 = temp;
+            }
+
+            if (v2.Coordinates.Y > v3.Coordinates.Y)
+            {
+                var temp = v2;
+                v2 = v3;
+                v3 = temp;
+            }
+
+            if (v1.Coordinates.Y > v2.Coordinates.Y)
+            {
+                var temp = v2;
+                v2 = v1;
+                v1 = temp;
+            }
+
+            Vector3 p1 = v1.Coordinates;
+            Vector3 p2 = v2.Coordinates;
+            Vector3 p3 = v3.Coordinates;
+
+            // light position
+            Vector3 lightPos = new Vector3(0, 5, 3);
+
+            // computing the cos of the angle between the light vector and the normal vector
+            // it will return a value between 0 and 1 that will be used as the intensity of the color
+            float nl1 = ComputeNDotL(v1.WorldCoordinates, v1.Normal, lightPos);
+            float nl2 = ComputeNDotL(v2.WorldCoordinates, v2.Normal, lightPos);
+            float nl3 = ComputeNDotL(v3.WorldCoordinates, v3.Normal, lightPos);
+
+
+            var data = new ScanLineData { };
+
+            // inverse slopes
+            float dP1P2, dP1P3;
+
+            // Computing inverse slopes
+            if (p2.Y - p1.Y > 0)
+            dP1P2 = (p2.X - p1.X) / (p2.Y - p1.Y);
+            else
+                dP1P2 = 0;
+
+            if (p3.Y - p1.Y > 0)
+            dP1P3 = (p3.X - p1.X) / (p3.Y - p1.Y);
+            else
+                dP1P3 = 0;
+
+            // First case 
+            if (dP1P2 > dP1P3)
+            {
+                for (var y = (int)p1.Y; y <= (int)p3.Y; y++)
+                {
+                    data.currentY = y;
+
+                    if (y < p2.Y)
+                    {
+                        data.ndotla = nl1;
+                        data.ndotlb = nl3;
+                        data.ndotlc = nl1;
+                        data.ndotld = nl2;
+                        ProcessScanLine(data, v1, v3, v1, v2, color);
+                    }
+                    else
+                    {
+                        data.ndotla = nl1;
+                        data.ndotlb = nl3;
+                        data.ndotlc = nl2;
+                        data.ndotld = nl3;
+                        ProcessScanLine(data, v1, v3, v2, v3, color);
+                    }
+                }
+            }
+            // Second case
+            else
+            {
+                for (var y = (int)p1.Y; y <= (int)p3.Y; y++)
+                {
+                    data.currentY = y;
+
+                    if (y < p2.Y)
+                    {
+                        data.ndotla = nl1;
+                        data.ndotlb = nl2;
+                        data.ndotlc = nl1;
+                        data.ndotld = nl3;
+                        ProcessScanLine(data, v1, v2, v1, v3, color);
+                    }
+                    else
+                    {
+                        data.ndotla = nl2;
+                        data.ndotlb = nl3;
+                        data.ndotlc = nl1;
+                        data.ndotld = nl3;
+                        ProcessScanLine(data, v2, v3, v1, v3, color);
+                    }
+                }
+            }
+        }
+
         // The main method of the engine that re-compute each vertex projection
         // during each frame
         public void Render(Camera camera, params Mesh[] meshes)
@@ -109,7 +299,7 @@ namespace SoftEngine
             var viewMatrix = Matrix.LookAtLH(camera.Position, camera.Target, Vector3.UnitY);
             // perspective
             var projectionMatrix = Matrix.PerspectiveFovLH(0.78f, (float)width / height, 0.01f, 1.0f);
-
+          
             foreach(Mesh mesh in meshes)
             {
                 // Beware to apply rotation before translation
@@ -119,6 +309,7 @@ namespace SoftEngine
                 // Combine world, view, projection
                 var transformMatrix = worldMatrix * viewMatrix * projectionMatrix;
 
+                var faceIndex = 0;
                 foreach (var face in mesh.Faces)
                 {
                     var vertexA = mesh.Vertices[face.A];
@@ -126,14 +317,15 @@ namespace SoftEngine
                     var vertexC = mesh.Vertices[face.C];
 
                     // First, we project the 3D coor into the 2D space
-                    var pixelA = Project(vertexA, transformMatrix);
-                    var pixelB = Project(vertexB, transformMatrix);
-                    var pixelC = Project(vertexC, transformMatrix);
+                    var pixelA = Project(vertexA, transformMatrix, worldMatrix);
+                    var pixelB = Project(vertexB, transformMatrix, worldMatrix);
+                    var pixelC = Project(vertexC, transformMatrix, worldMatrix);
 
                     // Then we can draw on screen
-                    DrawBline(pixelA, pixelB);
-                    DrawBline(pixelB, pixelC);
-                    DrawBline(pixelC, pixelA);
+                    // var color = 0.25f + (faceIndex % mesh.Faces.Length) * 0.75f / mesh.Faces.Length;
+                    var color = 1.0f;
+                    DrawTriangle(pixelA, pixelB, pixelC, new Color4(color, color, color, 1));
+                    faceIndex++;
                 }
             }
         }
@@ -150,6 +342,7 @@ namespace SoftEngine
            for ( var meshIndex = 0; meshIndex < jsonObject.meshes.Count; meshIndex++)
             {
                 var verticesArray = jsonObject.meshes[meshIndex].positions;
+                var normalsArray = jsonObject.meshes[meshIndex].normals;
 
                 // Faces
                 var indicesArray = jsonObject.meshes[meshIndex].indices;
@@ -185,7 +378,13 @@ namespace SoftEngine
                     var x = (float)verticesArray[index * verticesStep].Value;
                     var y = (float)verticesArray[index * verticesStep + 1].Value;
                     var z = (float)verticesArray[index * verticesStep + 2].Value;
-                    mesh.Vertices[index] = new Vector3(x, y, z);
+
+                    // Loading the vertex normal exported by Blender
+                    var nx = (float)normalsArray[index * verticesStep].Value;
+                    var ny = (float)normalsArray[index * verticesStep + 1].Value;
+                    var nz = (float)normalsArray[index * verticesStep + 2].Value;
+
+                    mesh.Vertices[index] = new Vertex{ Coordinates= new Vector3(x, y, z), Normal= new Vector3(nx, ny, nz) };
                 }
 
                 // Then filling the Faces array
